@@ -5,7 +5,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.11.0';
+    const VERSION = '0.12.0';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
@@ -20,10 +20,10 @@
     const DEFAULT_OUTLINE_COLOR = '#111111';
     const DEFAULT_OUTLINE_TYPE = 'hazard_shell';
 
-    // Hazard Shell remains the original normal-extruded shell.
-    // Ink uses a continuous scaled shell so hard vertex normals cannot open
-    // gaps at corners. Its shader then adds controlled stroke variation and
-    // camera-depth scaling to make the contour behave more like perspective ink.
+    // Hazard Shell preserves the original normal-extruded boundary.
+    // Ink uses a continuous radial shell with controlled stroke variation and
+    // camera-depth scaling. Sketch pushes that same idea toward hand-drawn
+    // line weight: slower pressure changes, organic wobble, and gentle taper.
     const OUTLINE_STYLES = {
         hazard_shell: {
             name: 'Hazard Shell',
@@ -40,6 +40,14 @@
             mode: 1,
             variation: 0.22,
             perspective: 0.85
+        },
+        sketch: {
+            name: 'Sketch',
+            thicknessScale: 0.82,
+            opacity: 0.96,
+            mode: 2,
+            variation: 0.32,
+            perspective: 0.65
         }
     };
 
@@ -313,21 +321,40 @@
                         return (a * 0.55 + b * 0.45);
                     }
 
+                    float sketchNoise(vec3 p) {
+                        float a = sin(dot(p, vec3(0.71, 1.93, 1.17)) + 0.4);
+                        float b = sin(dot(p, vec3(1.41, 0.63, 2.27)) + 2.1);
+                        float c = sin(dot(p, vec3(2.37, 1.11, 0.53)) + 4.2);
+                        return a * 0.5 + b * 0.3 + c * 0.2;
+                    }
+
                     void main() {
                         vec3 expanded;
 
                         if (icsOutlineMode > 0.5) {
-                            // A radial/scale expansion is continuous across
-                            // hard vertex normals, unlike normal extrusion.
+                            // Radial expansion keeps the stroke continuous at
+                            // hard corners instead of following discontinuous normals.
                             vec3 fromCenter = position - icsObjectCenter;
-                            float variation = 1.0 + inkNoise(position) * icsInkVariation;
+                            float variation;
+
+                            if (icsOutlineMode > 1.5) {
+                                // Sketch: simulate a creative hand's pressure.
+                                // Large, slow changes make line weight breathe;
+                                // smaller detail adds natural wobble without
+                                // turning the contour into noisy geometry.
+                                float broad = sketchNoise(position * 0.72);
+                                float fine = inkNoise(position * 1.35);
+                                float pressure = 0.84 + broad * 0.30 + fine * 0.08;
+                                variation = max(0.55, pressure);
+                            } else {
+                                // Ink: controlled, cleaner stroke variation.
+                                variation = 1.0 + inkNoise(position) * icsInkVariation;
+                            }
 
                             vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
                             float depth = max(1.0, -viewPosition.z);
                             float perspectiveFactor = 1.0;
                             if (icsPerspectiveCamera > 0.5) {
-                                // Closer geometry receives a larger stroke.
-                                // The clamp prevents extreme close-up blowout.
                                 perspectiveFactor = clamp(32.0 / depth, 0.65, 2.2);
                                 perspectiveFactor = mix(1.0, perspectiveFactor, icsInkPerspective);
                             }
