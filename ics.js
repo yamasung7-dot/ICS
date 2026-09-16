@@ -5,7 +5,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.10.0';
+    const VERSION = '0.11.0';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
@@ -20,20 +20,26 @@
     const DEFAULT_OUTLINE_COLOR = '#111111';
     const DEFAULT_OUTLINE_TYPE = 'hazard_shell';
 
-    // Styles are deliberately added one at a time. Hazard Shell is the
-    // existing v0.9 behavior and must remain unchanged as a preset.
+    // Hazard Shell remains the original normal-extruded shell.
+    // Ink uses a continuous scaled shell so hard vertex normals cannot open
+    // gaps at corners. Its shader then adds controlled stroke variation and
+    // camera-depth scaling to make the contour behave more like perspective ink.
     const OUTLINE_STYLES = {
         hazard_shell: {
             name: 'Hazard Shell',
             thicknessScale: 1,
-            opacity: 0.95
+            opacity: 0.95,
+            mode: 0,
+            variation: 0,
+            perspective: 0
         },
         ink: {
             name: 'Ink',
-            // A tighter shell gives the current contour a cleaner ink-stroke
-            // character while keeping the same non-destructive silhouette method.
-            thicknessScale: 0.75,
-            opacity: 1
+            thicknessScale: 0.9,
+            opacity: 1,
+            mode: 1,
+            variation: 0.22,
+            perspective: 0.85
         }
     };
 
@@ -285,13 +291,53 @@
                     icsOutlineThickness: { value: outlineThickness },
                     icsOutlineColor: { value: new THREE.Color(outlineColor) },
                     icsOutlineThicknessScale: { value: getCurrentOutlineStyle().thicknessScale },
-                    icsOutlineOpacity: { value: getCurrentOutlineStyle().opacity }
+                    icsOutlineOpacity: { value: getCurrentOutlineStyle().opacity },
+                    icsOutlineMode: { value: getCurrentOutlineStyle().mode },
+                    icsInkVariation: { value: getCurrentOutlineStyle().variation },
+                    icsInkPerspective: { value: getCurrentOutlineStyle().perspective },
+                    icsPerspectiveCamera: { value: 0 },
+                    icsObjectCenter: { value: new THREE.Vector3() }
                 },
                 vertexShader: `
                     uniform float icsOutlineThickness;
                     uniform float icsOutlineThicknessScale;
+                    uniform float icsOutlineMode;
+                    uniform float icsInkVariation;
+                    uniform float icsInkPerspective;
+                    uniform float icsPerspectiveCamera;
+                    uniform vec3 icsObjectCenter;
+
+                    float inkNoise(vec3 p) {
+                        float a = sin(dot(p, vec3(1.73, 4.91, 2.37)));
+                        float b = sin(dot(p, vec3(5.13, 1.29, 3.77)) + 1.7);
+                        return (a * 0.55 + b * 0.45);
+                    }
+
                     void main() {
-                        vec3 expanded = position + normalize(normal) * icsOutlineThickness * icsOutlineThicknessScale;
+                        vec3 expanded;
+
+                        if (icsOutlineMode > 0.5) {
+                            // A radial/scale expansion is continuous across
+                            // hard vertex normals, unlike normal extrusion.
+                            vec3 fromCenter = position - icsObjectCenter;
+                            float variation = 1.0 + inkNoise(position) * icsInkVariation;
+
+                            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+                            float depth = max(1.0, -viewPosition.z);
+                            float perspectiveFactor = 1.0;
+                            if (icsPerspectiveCamera > 0.5) {
+                                // Closer geometry receives a larger stroke.
+                                // The clamp prevents extreme close-up blowout.
+                                perspectiveFactor = clamp(32.0 / depth, 0.65, 2.2);
+                                perspectiveFactor = mix(1.0, perspectiveFactor, icsInkPerspective);
+                            }
+
+                            float scale = 1.0 + icsOutlineThickness * icsOutlineThicknessScale * variation * perspectiveFactor;
+                            expanded = icsObjectCenter + fromCenter * scale;
+                        } else {
+                            expanded = position + normalize(normal) * icsOutlineThickness * icsOutlineThicknessScale;
+                        }
+
                         gl_Position = projectionMatrix * modelViewMatrix * vec4(expanded, 1.0);
                     }
                 `,
@@ -324,6 +370,9 @@
         if (material.uniforms.icsOutlineColor?.value?.set) material.uniforms.icsOutlineColor.value.set(outlineColor);
         if (material.uniforms.icsOutlineThicknessScale) material.uniforms.icsOutlineThicknessScale.value = style.thicknessScale;
         if (material.uniforms.icsOutlineOpacity) material.uniforms.icsOutlineOpacity.value = style.opacity;
+        if (material.uniforms.icsOutlineMode) material.uniforms.icsOutlineMode.value = style.mode;
+        if (material.uniforms.icsInkVariation) material.uniforms.icsInkVariation.value = style.variation;
+        if (material.uniforms.icsInkPerspective) material.uniforms.icsInkPerspective.value = style.perspective;
         material.name = 'ICS ' + style.name + ' Outline Material';
         material.needsUpdate = true;
     }
@@ -383,6 +432,18 @@
         }
     }
 
+    function getOutlineGeometryCenter(geometry) {
+        try {
+            if (!geometry.boundingBox && typeof geometry.computeBoundingBox === 'function') geometry.computeBoundingBox();
+            if (geometry.boundingBox && typeof THREE !== 'undefined') {
+                return geometry.boundingBox.getCenter(new THREE.Vector3());
+            }
+        } catch (error) {
+            console.warn('[ICS] Could not calculate outline center:', error);
+        }
+        return typeof THREE !== 'undefined' ? new THREE.Vector3() : null;
+    }
+
     function createOutlineForMesh(mesh) {
         if (!mesh || !mesh.isMesh || !mesh.geometry) return null;
         if (mesh.userData?.[OUTLINE_OBJECT_KEY]) return mesh.userData[OUTLINE_OBJECT_KEY];
@@ -396,6 +457,23 @@
             outline.renderOrder = 999;
             outline.frustumCulled = mesh.frustumCulled;
             outline.matrixAutoUpdate = true;
+
+            const center = getOutlineGeometryCenter(mesh.geometry);
+            if (center && material.uniforms?.icsObjectCenter) {
+                material.uniforms.icsObjectCenter.value.copy(center);
+            }
+
+            outline.onBeforeRender = function (renderer, scene, camera) {
+                const currentMaterial = getOutlineMaterial.material;
+                if (!currentMaterial?.uniforms) return;
+                if (currentMaterial.uniforms.icsPerspectiveCamera) {
+                    currentMaterial.uniforms.icsPerspectiveCamera.value = camera?.isPerspectiveCamera ? 1 : 0;
+                }
+                if (currentMaterial.uniforms.icsObjectCenter && center) {
+                    currentMaterial.uniforms.icsObjectCenter.value.copy(center);
+                }
+            };
+
             mesh.add(outline);
             mesh.userData = mesh.userData || {};
             mesh.userData[OUTLINE_OBJECT_KEY] = outline;
