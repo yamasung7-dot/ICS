@@ -5,12 +5,14 @@
 (function () {
 	'use strict';
 
-	const VERSION = '0.3.1';
+	const VERSION = '0.3.2';
 	let installed = false;
 	let surfaceEnabled = false;
 	const states = new WeakMap();
 	const TARGET_SIZE = 256;
 	let surface;
+	let probeTool;
+	let creatorTool;
 
 	function getPreviews() {
 		return (typeof Preview !== 'undefined' && Array.isArray(Preview.all))
@@ -137,6 +139,12 @@
 		removeSurface();
 	}
 
+	function returnToMoveTool() {
+		if (typeof BarItems !== 'undefined' && BarItems.move_tool && typeof BarItems.move_tool.select === 'function') {
+			BarItems.move_tool.select();
+		}
+	}
+
 	function openCreator() {
 		new Dialog({
 			id: 'ics_creator',
@@ -180,30 +188,44 @@
 					surfaceEnabled = !!form.surface;
 					createSurface();
 					if (surface) surface.visible = surfaceEnabled;
-				} else {
-					if (installed) uninstall();
+				} else if (installed) {
+					uninstall();
 				}
 			}
 		}).show();
 	}
 
-	const action = new Action('ics_dodfp_probe', {
+	// These are real Blockbench Tools, so they appear in the Toolbox rather than only in a menu.
+	// main_tools is the normal modeling toolbox row used by Blockbench's built-in tools.
+	probeTool = new Tool('ics_dodfp_probe', {
 		name: 'ICS: DODFP Probe',
 		icon: 'memory',
-		click() {
+		category: 'tools',
+		toolbar: 'main_tools',
+		transformerMode: 'hidden',
+		modes: ['edit', 'paint', 'display', 'animate', 'pose'],
+		onSelect() {
 			if (installed) {
 				uninstall();
 				Blockbench.showQuickMessage('ICS v' + VERSION + ' DODFP probe removed');
 			} else {
 				install();
 			}
+			returnToMoveTool();
 		}
 	});
 
-	const creatorAction = new Action('ics_cursed_spirit_creator', {
+	creatorTool = new Tool('ics_cursed_spirit_creator', {
 		name: 'ICS: Cursed Spirit Creator',
 		icon: 'auto_fix_high',
-		click: openCreator
+		category: 'tools',
+		toolbar: 'main_tools',
+		transformerMode: 'hidden',
+		modes: ['edit', 'paint', 'display', 'animate', 'pose'],
+		onSelect() {
+			openCreator();
+			returnToMoveTool();
+		}
 	});
 
 	Plugin.register('ics', {
@@ -216,8 +238,6 @@
 		variant: 'both',
 		min_version: '4.0.0',
 		onload() {
-			MenuBar.view.addAction(creatorAction);
-			MenuBar.view.addAction(action);
 			Blockbench.showQuickMessage('ICS v' + VERSION + ' imported successfully');
 		},
 		oninstall() {
@@ -228,8 +248,8 @@
 		},
 		onunload() {
 			uninstall();
-			creatorAction.delete();
-			action.delete();
+			if (probeTool && typeof probeTool.delete === 'function') probeTool.delete();
+			if (creatorTool && typeof creatorTool.delete === 'function') creatorTool.delete();
 		}
 	});
 })();
