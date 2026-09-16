@@ -5,20 +5,19 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.8.0';
+    const VERSION = '0.9.0';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
     const MOBILE_OPTIMIZER_ID = 'ics_mobile_optimizer';
     const MOBILE_OPTIMIZER_ACTION_ID = 'ics_mobile_optimizer_action';
     const OUTLINE_ACTION_ID = 'ics_outlines_action';
+    const OUTLINE_SETTINGS_ACTION_ID = 'ics_outline_settings_action';
     const OUTLINE_OBJECT_KEY = '__ics_outline';
+    const OUTLINE_SETTINGS_KEY = 'ics_outline_settings';
 
-    // Outline philosophy:
-    // Think about the result as a 2D drawing first. A circle has many vertices,
-    // but its drawing only needs the visible outside contour. The 3D version
-    // therefore renders an expanded back-facing shell behind the real mesh.
-    const OUTLINE_THICKNESS = 0.12;
+    const DEFAULT_OUTLINE_THICKNESS = 0.12;
+    const DEFAULT_OUTLINE_COLOR = '#111111';
 
     const tools = [];
     const actions = [];
@@ -27,6 +26,8 @@
     let originalPreviewRender = null;
     let cameraListenerInstalled = false;
     let outlinesEnabled = false;
+    let outlineThickness = DEFAULT_OUTLINE_THICKNESS;
+    let outlineColor = DEFAULT_OUTLINE_COLOR;
 
     function safeDelete(item) {
         try {
@@ -248,17 +249,34 @@
     // ---------------------------------------------------------------------
     // 2D-INSPIRED SILHOUETTE OUTLINES
     // ---------------------------------------------------------------------
-    //
-    // The previous implementation used EdgesGeometry. That answers the
-    // question "where are the mesh edges?", but that is not the visual
-    // definition of an outline. A 2D outline answers "where is the outside
-    // contour of the visible shape?"
-    //
-    // We therefore use a classic inverted-shell approach entirely in the
-    // renderer. The shell is expanded along vertex normals and rendered with
-    // BackSide. The real mesh is drawn over it, hiding all internal shell
-    // edges. No project geometry, texture, material, or PBR data is changed.
-    // ---------------------------------------------------------------------
+    // The outline answers the 2D question: "where is the outside contour
+    // of the visible shape?" Internal mesh edges are deliberately hidden.
+
+    function loadOutlineSettings() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(OUTLINE_SETTINGS_KEY) || 'null');
+            if (saved) {
+                const thickness = Number(saved.thickness);
+                if (Number.isFinite(thickness)) outlineThickness = clamp(thickness, 0.01, 0.5);
+                if (typeof saved.color === 'string' && /^#[0-9a-f]{6}$/i.test(saved.color)) {
+                    outlineColor = saved.color;
+                }
+            }
+        } catch (error) {
+            console.warn('[ICS] Could not load outline settings:', error);
+        }
+    }
+
+    function saveOutlineSettings() {
+        try {
+            localStorage.setItem(OUTLINE_SETTINGS_KEY, JSON.stringify({
+                thickness: outlineThickness,
+                color: outlineColor
+            }));
+        } catch (error) {
+            console.warn('[ICS] Could not save outline settings:', error);
+        }
+    }
 
     function getOutlineMaterial() {
         if (typeof THREE === 'undefined') return null;
@@ -267,7 +285,8 @@
         try {
             getOutlineMaterial.material = new THREE.ShaderMaterial({
                 uniforms: {
-                    icsOutlineThickness: { value: OUTLINE_THICKNESS }
+                    icsOutlineThickness: { value: outlineThickness },
+                    icsOutlineColor: { value: new THREE.Color(outlineColor) }
                 },
                 vertexShader: `
                     uniform float icsOutlineThickness;
@@ -277,8 +296,9 @@
                     }
                 `,
                 fragmentShader: `
+                    uniform vec3 icsOutlineColor;
                     void main() {
-                        gl_FragColor = vec4(0.067, 0.067, 0.067, 0.95);
+                        gl_FragColor = vec4(icsOutlineColor, 0.95);
                     }
                 `,
                 side: THREE.BackSide,
@@ -295,12 +315,55 @@
         }
     }
 
+    function updateOutlineMaterial() {
+        const material = getOutlineMaterial.material;
+        if (!material?.uniforms) return;
+        if (material.uniforms.icsOutlineThickness) {
+            material.uniforms.icsOutlineThickness.value = outlineThickness;
+        }
+        if (material.uniforms.icsOutlineColor?.value && typeof material.uniforms.icsOutlineColor.value.set === 'function') {
+            material.uniforms.icsOutlineColor.value.set(outlineColor);
+        }
+        material.needsUpdate = true;
+    }
+
+    function openOutlineSettings() {
+        const dialog = new Dialog({
+            id: 'ics_outline_settings',
+            title: 'ICS Outline Settings',
+            form: {
+                thickness: {
+                    label: 'Outline Size',
+                    type: 'range',
+                    min: 0.01,
+                    max: 0.5,
+                    step: 0.01,
+                    value: outlineThickness
+                },
+                color: {
+                    label: 'Outline Color',
+                    type: 'color',
+                    value: outlineColor
+                }
+            },
+            onConfirm(form) {
+                const thickness = Number(form.thickness);
+                const color = String(form.color || '');
+                if (Number.isFinite(thickness)) outlineThickness = clamp(thickness, 0.01, 0.5);
+                if (/^#[0-9a-f]{6}$/i.test(color)) outlineColor = color;
+                updateOutlineMaterial();
+                saveOutlineSettings();
+                if (outlinesEnabled) applyOutlinesToAllElements();
+                Blockbench.showQuickMessage('ICS Outline Settings Applied');
+            }
+        });
+        dialog.show();
+    }
+
     function disposeOutlineObject(outline) {
         try {
             if (!outline) return;
             if (outline.parent) outline.parent.remove(outline);
-            // The geometry belongs to Blockbench's mesh and is intentionally
-            // shared. Never dispose it here.
         } catch (error) {
             console.warn('[ICS] Outline cleanup failed:', error);
         }
@@ -321,9 +384,6 @@
             outline.renderOrder = 999;
             outline.frustumCulled = mesh.frustumCulled;
             outline.matrixAutoUpdate = true;
-
-            // Keep the shell in the exact same local coordinate system as the
-            // original mesh. This preserves arbitrary rotations/scales.
             mesh.add(outline);
             mesh.userData = mesh.userData || {};
             mesh.userData[OUTLINE_OBJECT_KEY] = outline;
@@ -353,6 +413,7 @@
     function applyOutlinesToAllElements() {
         if (!outlinesEnabled) return;
         try {
+            updateOutlineMaterial();
             const elements = typeof Outliner !== 'undefined' && Array.isArray(Outliner.elements)
                 ? Outliner.elements
                 : [];
@@ -462,9 +523,11 @@
         min_version: '4.0.0',
 
         onload() {
+            loadOutlineSettings();
             createFeature(MOBILE_OPTIMIZER_ID, 'Mobile Optimization', 'speed', toggleMobileOptimization);
             createFeatureAction(MOBILE_OPTIMIZER_ACTION_ID, 'Mobile Optimization', 'speed', toggleMobileOptimization);
             createFeatureAction(OUTLINE_ACTION_ID, 'Outlines', 'border_all', toggleOutlines);
+            createFeatureAction(OUTLINE_SETTINGS_ACTION_ID, 'Outline Settings', 'settings', openOutlineSettings);
             installOutlineRefreshListener();
             buildHierarchy();
             Blockbench.showQuickMessage('ICS v' + VERSION + ' loaded');
@@ -473,7 +536,7 @@
         oninstall() {},
 
         onuninstall() {
-            this.onunload();
+            cleanup();
         },
 
         onunload() {
