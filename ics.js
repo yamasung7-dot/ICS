@@ -5,6 +5,7 @@
 (function () {
 	'use strict';
 
+	const VERSION = '0.3.1';
 	let installed = false;
 	let surfaceEnabled = false;
 	const states = new WeakMap();
@@ -49,8 +50,6 @@
 		material.needsUpdate = true;
 		surface.visible = true;
 
-		// Keep the surface in a predictable camera-facing location so it is
-		// actually observable without making assumptions about the model scale.
 		const camera = preview.camera;
 		const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
 		surface.position.copy(camera.position).add(direction.multiplyScalar(8));
@@ -87,18 +86,14 @@
 				const oldSurfaceVisible = surface ? surface.visible : false;
 				if (surface) surface.visible = false;
 
-				// Stage 1: render the real Blockbench scene into a 256×256 texture.
 				renderer.setRenderTarget(target);
 				renderer.clear();
 				renderer.render(Canvas.scene, preview.camera);
 				renderer.setRenderTarget(null);
 
-				// Stage 2: use that 2D texture as data on a real 3D plane.
 				if (surfaceEnabled) updateSurface(preview, target.texture);
 				else if (surface) surface.visible = oldSurfaceVisible;
 
-				// Stage 3: render the normal Blockbench scene again, now with the
-				// optional DODFP surface carrying the previous image-space result.
 				originalRender();
 			} catch (error) {
 				console.error('[ICS] DODFP bridge failed:', error);
@@ -110,6 +105,7 @@
 		};
 
 		console.info('[ICS] DODFP bridge installed:', {
+			version: VERSION,
 			preview,
 			renderer,
 			renderTarget: target,
@@ -125,7 +121,7 @@
 			if (installPreview(preview)) count++;
 		});
 		installed = true;
-		Blockbench.showQuickMessage('ICS DODFP probe: ' + count + ' preview(s) connected');
+		Blockbench.showQuickMessage('ICS v' + VERSION + ': DODFP probe connected (' + count + ' preview(s))');
 	}
 
 	function uninstall() {
@@ -150,11 +146,11 @@
 			form: {
 				identity: {
 					type: 'info',
-					text: '**IMMORTAL CURSED SPIRIT**\n\nThe first real DODFP bridge is active: Blockbench geometry is rendered to a 2D texture, then that texture is fed back onto a 3D surface.'
+					text: '**IMMORTAL CURSED SPIRIT**\n\nDODFP bridge v' + VERSION + ': Blockbench geometry is rendered to a 2D texture, then that texture is fed back onto a 3D surface.'
 				},
 				state: {
 					type: 'info',
-					text: `**Probe:** ${installed ? 'CONNECTED' : 'DORMANT'}\n**Surface:** ${surfaceEnabled ? 'VISIBLE' : 'HIDDEN'}`
+					text: `**Version:** ${VERSION}\n**Probe:** ${installed ? 'CONNECTED' : 'DORMANT'}\n**Surface:** ${surfaceEnabled ? 'VISIBLE' : 'HIDDEN'}`
 				},
 				enable: {
 					type: 'checkbox',
@@ -197,7 +193,7 @@
 		click() {
 			if (installed) {
 				uninstall();
-				Blockbench.showQuickMessage('ICS DODFP probe removed');
+				Blockbench.showQuickMessage('ICS v' + VERSION + ' DODFP probe removed');
 			} else {
 				install();
 			}
@@ -215,15 +211,18 @@
 		author: 'TFO',
 		description: 'Experimental DODFP rendering bridge for Blockbench.',
 		about: 'Experimental 3D → 2D → 3D rendering bridge using Blockbench\'s real WebGLRenderer and a Three.js texture surface.',
-		version: '0.3.0',
+		version: VERSION,
 		icon: 'memory',
 		variant: 'both',
 		min_version: '4.0.0',
 		onload() {
 			MenuBar.view.addAction(creatorAction);
 			MenuBar.view.addAction(action);
+			Blockbench.showQuickMessage('ICS v' + VERSION + ' imported successfully');
 		},
-		oninstall() {},
+		oninstall() {
+			console.info('[ICS] Version ' + VERSION + ' imported successfully.');
+		},
 		onuninstall() {
 			this.onunload();
 		},
