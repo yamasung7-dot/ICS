@@ -1,11 +1,11 @@
 // ICS — Immortal Cursed Spirit
-// Mobile optimization + 2D-inspired renderer-side outlines.
-// The outline is a silhouette shell: internal vertices/edges are not drawn.
+// Mobile optimization + 2D-inspired renderer-side outline styles.
+// Outline philosophy: preserve the visual meaning of the outer 2D contour.
 
 (function () {
     'use strict';
 
-    const VERSION = '0.9.0';
+    const VERSION = '0.10.0';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
@@ -18,6 +18,24 @@
 
     const DEFAULT_OUTLINE_THICKNESS = 0.12;
     const DEFAULT_OUTLINE_COLOR = '#111111';
+    const DEFAULT_OUTLINE_TYPE = 'hazard_shell';
+
+    // Styles are deliberately added one at a time. Hazard Shell is the
+    // existing v0.9 behavior and must remain unchanged as a preset.
+    const OUTLINE_STYLES = {
+        hazard_shell: {
+            name: 'Hazard Shell',
+            thicknessScale: 1,
+            opacity: 0.95
+        },
+        ink: {
+            name: 'Ink',
+            // A tighter shell gives the current contour a cleaner ink-stroke
+            // character while keeping the same non-destructive silhouette method.
+            thicknessScale: 0.75,
+            opacity: 1
+        }
+    };
 
     const tools = [];
     const actions = [];
@@ -28,6 +46,7 @@
     let outlinesEnabled = false;
     let outlineThickness = DEFAULT_OUTLINE_THICKNESS;
     let outlineColor = DEFAULT_OUTLINE_COLOR;
+    let outlineType = DEFAULT_OUTLINE_TYPE;
 
     function safeDelete(item) {
         try {
@@ -53,9 +72,7 @@
 
     function returnToMoveTool() {
         try {
-            if (typeof BarItems !== 'undefined' && BarItems.move_tool?.select) {
-                BarItems.move_tool.select();
-            }
+            if (typeof BarItems !== 'undefined' && BarItems.move_tool?.select) BarItems.move_tool.select();
         } catch (error) {}
     }
 
@@ -68,9 +85,8 @@
             transformerMode: 'hidden',
             modes: ['edit', 'paint', 'display', 'animate', 'pose'],
             onSelect() {
-                try {
-                    handler?.();
-                } catch (error) {
+                try { handler?.(); }
+                catch (error) {
                     console.error('[ICS] Feature failed:', id, error);
                     Blockbench.showQuickMessage('ICS feature failed');
                 }
@@ -86,9 +102,8 @@
             name,
             icon,
             click() {
-                try {
-                    handler?.();
-                } catch (error) {
+                try { handler?.(); }
+                catch (error) {
                     console.error('[ICS] Feature action failed:', id, error);
                     Blockbench.showQuickMessage('ICS feature failed');
                 }
@@ -109,13 +124,11 @@
     function calculatePixelRatio(preview) {
         const camera = preview?.camera;
         if (!camera) return 1;
-
         if (camera.isOrthographicCamera) {
             const zoom = Math.max(0.01, Number(camera.zoom) || 0.5);
             const normalized = clamp(Math.sqrt(zoom / 0.5), 0, 1);
             return clamp(0.3 + normalized * 0.7, 0.3, 1);
         }
-
         const target = preview?.controls?.target;
         let distance = 40;
         if (camera.position && target && typeof camera.position.distanceTo === 'function') {
@@ -123,14 +136,11 @@
         } else if (camera.position && typeof camera.position.length === 'function') {
             distance = camera.position.length();
         }
-
         const nearDistance = 20;
         const farDistance = 320;
         const normalized = clamp(
             (Math.log(farDistance) - Math.log(Math.max(nearDistance, distance))) /
-            (Math.log(farDistance) - Math.log(nearDistance)),
-            0,
-            1
+            (Math.log(farDistance) - Math.log(nearDistance)), 0, 1
         );
         return clamp(0.3 + normalized * 0.7, 0.3, 1);
     }
@@ -139,28 +149,20 @@
         if (!mobileOptimizationEnabled || !preview) return;
         const renderer = preview.renderer;
         if (!renderer || typeof renderer.setPixelRatio !== 'function') return;
-
         if (!originalPixelRatios.has(renderer)) {
             const ratio = typeof renderer.getPixelRatio === 'function'
                 ? renderer.getPixelRatio()
                 : (window.devicePixelRatio || 1);
             originalPixelRatios.set(renderer, ratio);
         }
-
         const desiredRatio = calculatePixelRatio(preview);
-        const currentRatio = typeof renderer.getPixelRatio === 'function'
-            ? renderer.getPixelRatio()
-            : null;
-        if (currentRatio === null || Math.abs(currentRatio - desiredRatio) > 0.01) {
-            renderer.setPixelRatio(desiredRatio);
-        }
+        const currentRatio = typeof renderer.getPixelRatio === 'function' ? renderer.getPixelRatio() : null;
+        if (currentRatio === null || Math.abs(currentRatio - desiredRatio) > 0.01) renderer.setPixelRatio(desiredRatio);
     }
 
     function applyOptimizationToAllPreviews() {
         try {
-            const previews = typeof Preview !== 'undefined' && Array.isArray(Preview.all)
-                ? Preview.all
-                : [];
+            const previews = typeof Preview !== 'undefined' && Array.isArray(Preview.all) ? Preview.all : [];
             for (const preview of previews) applyOptimizationToPreview(preview);
         } catch (error) {
             console.warn('[ICS] Mobile optimization update failed:', error);
@@ -170,7 +172,6 @@
     function installRenderHook() {
         if (typeof Preview === 'undefined' || !Preview.prototype || typeof Preview.prototype.render !== 'function') return;
         if (originalPreviewRender) return;
-
         originalPreviewRender = Preview.prototype.render;
         Preview.prototype.render = function () {
             if (mobileOptimizationEnabled) applyOptimizationToPreview(this);
@@ -219,7 +220,6 @@
 
     function setMobileOptimization(enabled) {
         mobileOptimizationEnabled = !!enabled;
-
         if (mobileOptimizationEnabled) {
             installRenderHook();
             installCameraListener();
@@ -236,10 +236,7 @@
             }
             originalPixelRatios.clear();
         }
-
-        Blockbench.showQuickMessage(
-            'ICS Mobile Optimization: ' + (mobileOptimizationEnabled ? 'ON' : 'OFF')
-        );
+        Blockbench.showQuickMessage('ICS Mobile Optimization: ' + (mobileOptimizationEnabled ? 'ON' : 'OFF'));
     }
 
     function toggleMobileOptimization() {
@@ -247,21 +244,17 @@
     }
 
     // ---------------------------------------------------------------------
-    // 2D-INSPIRED SILHOUETTE OUTLINES
+    // 2D-INSPIRED OUTLINE STYLES
     // ---------------------------------------------------------------------
-    // The outline answers the 2D question: "where is the outside contour
-    // of the visible shape?" Internal mesh edges are deliberately hidden.
 
     function loadOutlineSettings() {
         try {
             const saved = JSON.parse(localStorage.getItem(OUTLINE_SETTINGS_KEY) || 'null');
-            if (saved) {
-                const thickness = Number(saved.thickness);
-                if (Number.isFinite(thickness)) outlineThickness = clamp(thickness, 0.01, 0.5);
-                if (typeof saved.color === 'string' && /^#[0-9a-f]{6}$/i.test(saved.color)) {
-                    outlineColor = saved.color;
-                }
-            }
+            if (!saved) return;
+            const thickness = Number(saved.thickness);
+            if (Number.isFinite(thickness)) outlineThickness = clamp(thickness, 0.01, 0.5);
+            if (typeof saved.color === 'string' && /^#[0-9a-f]{6}$/i.test(saved.color)) outlineColor = saved.color;
+            if (typeof saved.type === 'string' && OUTLINE_STYLES[saved.type]) outlineType = saved.type;
         } catch (error) {
             console.warn('[ICS] Could not load outline settings:', error);
         }
@@ -270,6 +263,7 @@
     function saveOutlineSettings() {
         try {
             localStorage.setItem(OUTLINE_SETTINGS_KEY, JSON.stringify({
+                type: outlineType,
                 thickness: outlineThickness,
                 color: outlineColor
             }));
@@ -278,27 +272,34 @@
         }
     }
 
+    function getCurrentOutlineStyle() {
+        return OUTLINE_STYLES[outlineType] || OUTLINE_STYLES[DEFAULT_OUTLINE_TYPE];
+    }
+
     function getOutlineMaterial() {
         if (typeof THREE === 'undefined') return null;
         if (getOutlineMaterial.material) return getOutlineMaterial.material;
-
         try {
             getOutlineMaterial.material = new THREE.ShaderMaterial({
                 uniforms: {
                     icsOutlineThickness: { value: outlineThickness },
-                    icsOutlineColor: { value: new THREE.Color(outlineColor) }
+                    icsOutlineColor: { value: new THREE.Color(outlineColor) },
+                    icsOutlineThicknessScale: { value: getCurrentOutlineStyle().thicknessScale },
+                    icsOutlineOpacity: { value: getCurrentOutlineStyle().opacity }
                 },
                 vertexShader: `
                     uniform float icsOutlineThickness;
+                    uniform float icsOutlineThicknessScale;
                     void main() {
-                        vec3 expanded = position + normalize(normal) * icsOutlineThickness;
+                        vec3 expanded = position + normalize(normal) * icsOutlineThickness * icsOutlineThicknessScale;
                         gl_Position = projectionMatrix * modelViewMatrix * vec4(expanded, 1.0);
                     }
                 `,
                 fragmentShader: `
                     uniform vec3 icsOutlineColor;
+                    uniform float icsOutlineOpacity;
                     void main() {
-                        gl_FragColor = vec4(icsOutlineColor, 0.95);
+                        gl_FragColor = vec4(icsOutlineColor, icsOutlineOpacity);
                     }
                 `,
                 side: THREE.BackSide,
@@ -307,7 +308,7 @@
                 depthWrite: false,
                 toneMapped: false
             });
-            getOutlineMaterial.material.name = 'ICS Silhouette Outline Material';
+            getOutlineMaterial.material.name = 'ICS ' + getCurrentOutlineStyle().name + ' Outline Material';
             return getOutlineMaterial.material;
         } catch (error) {
             console.warn('[ICS] Could not create outline material:', error);
@@ -318,13 +319,19 @@
     function updateOutlineMaterial() {
         const material = getOutlineMaterial.material;
         if (!material?.uniforms) return;
-        if (material.uniforms.icsOutlineThickness) {
-            material.uniforms.icsOutlineThickness.value = outlineThickness;
-        }
-        if (material.uniforms.icsOutlineColor?.value && typeof material.uniforms.icsOutlineColor.value.set === 'function') {
-            material.uniforms.icsOutlineColor.value.set(outlineColor);
-        }
+        const style = getCurrentOutlineStyle();
+        if (material.uniforms.icsOutlineThickness) material.uniforms.icsOutlineThickness.value = outlineThickness;
+        if (material.uniforms.icsOutlineColor?.value?.set) material.uniforms.icsOutlineColor.value.set(outlineColor);
+        if (material.uniforms.icsOutlineThicknessScale) material.uniforms.icsOutlineThicknessScale.value = style.thicknessScale;
+        if (material.uniforms.icsOutlineOpacity) material.uniforms.icsOutlineOpacity.value = style.opacity;
+        material.name = 'ICS ' + style.name + ' Outline Material';
         material.needsUpdate = true;
+    }
+
+    function getOutlineStyleOptions() {
+        const options = {};
+        for (const [id, style] of Object.entries(OUTLINE_STYLES)) options[id] = style.name;
+        return options;
     }
 
     function openOutlineSettings() {
@@ -332,6 +339,12 @@
             id: 'ics_outline_settings',
             title: 'ICS Outline Settings',
             form: {
+                type: {
+                    label: 'Outline Type',
+                    type: 'select',
+                    options: getOutlineStyleOptions(),
+                    value: outlineType
+                },
                 thickness: {
                     label: 'Outline Size',
                     type: 'range',
@@ -347,6 +360,7 @@
                 }
             },
             onConfirm(form) {
+                if (typeof form.type === 'string' && OUTLINE_STYLES[form.type]) outlineType = form.type;
                 const thickness = Number(form.thickness);
                 const color = String(form.color || '');
                 if (Number.isFinite(thickness)) outlineThickness = clamp(thickness, 0.01, 0.5);
@@ -354,7 +368,7 @@
                 updateOutlineMaterial();
                 saveOutlineSettings();
                 if (outlinesEnabled) applyOutlinesToAllElements();
-                Blockbench.showQuickMessage('ICS Outline Settings Applied');
+                Blockbench.showQuickMessage('ICS ' + getCurrentOutlineStyle().name + ' Applied');
             }
         });
         dialog.show();
@@ -372,10 +386,8 @@
     function createOutlineForMesh(mesh) {
         if (!mesh || !mesh.isMesh || !mesh.geometry) return null;
         if (mesh.userData?.[OUTLINE_OBJECT_KEY]) return mesh.userData[OUTLINE_OBJECT_KEY];
-
         const material = getOutlineMaterial();
         if (!material || typeof THREE === 'undefined') return null;
-
         try {
             const outline = new THREE.Mesh(mesh.geometry, material);
             outline.name = 'ics_outline';
@@ -414,9 +426,7 @@
         if (!outlinesEnabled) return;
         try {
             updateOutlineMaterial();
-            const elements = typeof Outliner !== 'undefined' && Array.isArray(Outliner.elements)
-                ? Outliner.elements
-                : [];
+            const elements = typeof Outliner !== 'undefined' && Array.isArray(Outliner.elements) ? Outliner.elements : [];
             for (const element of elements) {
                 const object = element?.mesh;
                 if (object) applyOutlineToObject(object);
@@ -428,9 +438,7 @@
 
     function removeAllOutlines() {
         try {
-            const elements = typeof Outliner !== 'undefined' && Array.isArray(Outliner.elements)
-                ? Outliner.elements
-                : [];
+            const elements = typeof Outliner !== 'undefined' && Array.isArray(Outliner.elements) ? Outliner.elements : [];
             for (const element of elements) {
                 const object = element?.mesh;
                 if (!object?.traverse) continue;
