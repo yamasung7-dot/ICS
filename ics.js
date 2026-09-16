@@ -1,5 +1,6 @@
 // ICS — Immortal Cursed Spirit
 // First DODFP experiment: 3D scene -> offscreen 2D texture -> normal Blockbench output.
+// UI direction: dark, technical, restrained cursed-spirit creator aesthetic.
 
 (function () {
 	'use strict';
@@ -42,7 +43,7 @@
 
 			try {
 				// Preserve the renderer's current size/pixel ratio, but keep the
-				// experimental offscreen buffer deliberately small for mobile.
+				experimental offscreen buffer deliberately small for mobile.
 				renderer.setRenderTarget(target);
 				renderer.clear();
 				renderer.render(Canvas.scene, preview.camera);
@@ -88,6 +89,47 @@
 		installed = false;
 	}
 
+	function openCreator() {
+		new Dialog({
+			id: 'ics_creator',
+			title: 'ICS — Cursed Spirit Creator',
+			width: 430,
+			darken: true,
+			form: {
+				identity: {
+					type: 'info',
+					text: '**IMMORTAL CURSED SPIRIT**\n\nDODFP laboratory interface. Spatial data enters the renderer, becomes image-space data, and is kept ready for the next experiment.'
+				},
+				state: {
+					type: 'info',
+					text: `**Probe status:** ${installed ? 'CONNECTED' : 'DORMANT'}`
+				},
+				enable: {
+					type: 'checkbox',
+					label: 'Enable DODFP probe',
+					description: 'Runs the experimental offscreen render while preserving Blockbench\'s visible render.',
+					value: installed
+				},
+				buffer: {
+					type: 'info',
+					text: `**2D buffer:** ${TARGET_SIZE} × ${TARGET_SIZE} RGBA · depth enabled`
+				},
+				warning: {
+					type: 'info',
+					text: '*Experimental specimen. Small buffers are intentional for Android/mobile stability.*'
+				}
+			},
+			buttons: ['Apply', 'Cancel'],
+			onConfirm(form) {
+				if (form.enable) {
+					if (!installed) install();
+				} else if (installed) {
+					uninstall();
+				}
+			}
+		}).show();
+	}
+
 	const action = new Action('ics_dodfp_probe', {
 		name: 'ICS: DODFP Probe',
 		icon: 'memory',
@@ -101,20 +143,28 @@
 		}
 	});
 
+	const creatorAction = new Action('ics_cursed_spirit_creator', {
+		name: 'ICS: Cursed Spirit Creator',
+		icon: 'auto_fix_high',
+		click: openCreator
+	});
+
 	Plugin.register('ics', {
 		title: 'ICS — Immortal Cursed Spirit',
 		author: 'TFO',
 		description: 'Experimental DODFP rendering bridge for Blockbench.',
-		about: 'The first ICS experiment traces a real Blockbench WebGLRenderer through an offscreen WebGLRenderTarget while preserving the normal visible render. It is intentionally small and mobile-conscious.',
-		version: '0.1.0',
+		about: 'A dark, technical creator interface for the ICS DODFP experiments. The first experiment traces a real Blockbench WebGLRenderer through an offscreen WebGLRenderTarget while preserving the normal visible render.',
+		version: '0.2.0',
 		icon: 'memory',
 		variant: 'both',
 		min_version: '4.0.0',
 		onload() {
+			MenuBar.view.addAction(creatorAction);
 			MenuBar.view.addAction(action);
 		},
 		onunload() {
 			uninstall();
+			creatorAction.delete();
 			action.delete();
 		}
 	});
