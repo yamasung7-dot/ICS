@@ -43,7 +43,7 @@
 
 			try {
 				// Preserve the renderer's current size/pixel ratio, but keep the
-				experimental offscreen buffer deliberately small for mobile.
+				// experimental offscreen buffer deliberately small for mobile.
 				renderer.setRenderTarget(target);
 				renderer.clear();
 				renderer.render(Canvas.scene, preview.camera);
@@ -154,13 +154,17 @@
 		author: 'TFO',
 		description: 'Experimental DODFP rendering bridge for Blockbench.',
 		about: 'A dark, technical creator interface for the ICS DODFP experiments. The first experiment traces a real Blockbench WebGLRenderer through an offscreen WebGLRenderTarget while preserving the normal visible render.',
-		version: '0.2.0',
+		version: '0.2.1',
 		icon: 'memory',
 		variant: 'both',
 		min_version: '4.0.0',
 		onload() {
 			MenuBar.view.addAction(creatorAction);
 			MenuBar.view.addAction(action);
+		},
+		oninstall() {},
+		onuninstall() {
+			this.onunload();
 		},
 		onunload() {
 			uninstall();
