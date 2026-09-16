@@ -1,12 +1,11 @@
 // ICS — Immortal Cursed Spirit
-// Mobile optimization + non-destructive renderer-side outlines.
-// Outlines are attached to Blockbench's existing Three.js preview objects;
-// no model elements, textures, materials, or PBR data are modified.
+// Mobile optimization + 2D-inspired renderer-side outlines.
+// The outline is a silhouette shell: internal vertices/edges are not drawn.
 
 (function () {
     'use strict';
 
-    const VERSION = '0.7.0';
+    const VERSION = '0.8.0';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
@@ -14,6 +13,12 @@
     const MOBILE_OPTIMIZER_ACTION_ID = 'ics_mobile_optimizer_action';
     const OUTLINE_ACTION_ID = 'ics_outlines_action';
     const OUTLINE_OBJECT_KEY = '__ics_outline';
+
+    // Outline philosophy:
+    // Think about the result as a 2D drawing first. A circle has many vertices,
+    // but its drawing only needs the visible outside contour. The 3D version
+    // therefore renders an expanded back-facing shell behind the real mesh.
+    const OUTLINE_THICKNESS = 0.12;
 
     const tools = [];
     const actions = [];
@@ -71,7 +76,6 @@
                 returnToMoveTool();
             }
         });
-
         tools.push(tool);
         return tool;
     }
@@ -89,7 +93,6 @@
                 }
             }
         });
-
         actions.push(action);
         return action;
     }
@@ -112,10 +115,8 @@
             return clamp(0.3 + normalized * 0.7, 0.3, 1);
         }
 
-        const controls = preview?.controls;
-        const target = controls?.target;
+        const target = preview?.controls?.target;
         let distance = 40;
-
         if (camera.position && target && typeof camera.position.distanceTo === 'function') {
             distance = camera.position.distanceTo(target);
         } else if (camera.position && typeof camera.position.length === 'function') {
@@ -130,13 +131,11 @@
             0,
             1
         );
-
         return clamp(0.3 + normalized * 0.7, 0.3, 1);
     }
 
     function applyOptimizationToPreview(preview) {
         if (!mobileOptimizationEnabled || !preview) return;
-
         const renderer = preview.renderer;
         if (!renderer || typeof renderer.setPixelRatio !== 'function') return;
 
@@ -151,7 +150,6 @@
         const currentRatio = typeof renderer.getPixelRatio === 'function'
             ? renderer.getPixelRatio()
             : null;
-
         if (currentRatio === null || Math.abs(currentRatio - desiredRatio) > 0.01) {
             renderer.setPixelRatio(desiredRatio);
         }
@@ -169,25 +167,20 @@
     }
 
     function installRenderHook() {
-        if (typeof Preview === 'undefined' || !Preview.prototype || typeof Preview.prototype.render !== 'function') {
-            return;
-        }
+        if (typeof Preview === 'undefined' || !Preview.prototype || typeof Preview.prototype.render !== 'function') return;
         if (originalPreviewRender) return;
 
         originalPreviewRender = Preview.prototype.render;
-        const icsRender = function () {
+        Preview.prototype.render = function () {
             if (mobileOptimizationEnabled) applyOptimizationToPreview(this);
             return originalPreviewRender.apply(this, arguments);
         };
-        Preview.prototype.render = icsRender;
     }
 
     function removeRenderHook() {
         try {
             if (originalPreviewRender && typeof Preview !== 'undefined' && Preview.prototype?.render) {
-                if (Preview.prototype.render !== originalPreviewRender) {
-                    Preview.prototype.render = originalPreviewRender;
-                }
+                Preview.prototype.render = originalPreviewRender;
             }
         } catch (error) {
             console.warn('[ICS] Render hook cleanup failed:', error);
@@ -233,17 +226,13 @@
         } else {
             removeCameraListener();
             removeRenderHook();
-
             try {
                 for (const [renderer, ratio] of originalPixelRatios) {
-                    if (renderer && typeof renderer.setPixelRatio === 'function') {
-                        renderer.setPixelRatio(ratio);
-                    }
+                    if (renderer && typeof renderer.setPixelRatio === 'function') renderer.setPixelRatio(ratio);
                 }
             } catch (error) {
                 console.warn('[ICS] Failed to restore renderer ratios:', error);
             }
-
             originalPixelRatios.clear();
         }
 
@@ -257,39 +246,61 @@
     }
 
     // ---------------------------------------------------------------------
-    // RENDERER-SIDE OUTLINES
+    // 2D-INSPIRED SILHOUETTE OUTLINES
     // ---------------------------------------------------------------------
     //
-    // This deliberately uses Blockbench's existing Three.js render objects.
-    // EdgesGeometry is used rather than duplicating Outliner elements, so the
-    // feature is non-destructive: turning it off removes only ICS objects.
+    // The previous implementation used EdgesGeometry. That answers the
+    // question "where are the mesh edges?", but that is not the visual
+    // definition of an outline. A 2D outline answers "where is the outside
+    // contour of the visible shape?"
     //
-    // This first renderer implementation is an edge/surface outline. It is
-    // not the same technique as Outline Creator's persistent negative-scale
-    // geometry, and it does not alter the project model.
+    // We therefore use a classic inverted-shell approach entirely in the
+    // renderer. The shell is expanded along vertex normals and rendered with
+    // BackSide. The real mesh is drawn over it, hiding all internal shell
+    // edges. No project geometry, texture, material, or PBR data is changed.
     // ---------------------------------------------------------------------
 
     function getOutlineMaterial() {
         if (typeof THREE === 'undefined') return null;
+        if (getOutlineMaterial.material) return getOutlineMaterial.material;
 
-        if (!getOutlineMaterial.material) {
-            getOutlineMaterial.material = new THREE.LineBasicMaterial({
-                color: 0x111111,
+        try {
+            getOutlineMaterial.material = new THREE.ShaderMaterial({
+                uniforms: {
+                    icsOutlineThickness: { value: OUTLINE_THICKNESS }
+                },
+                vertexShader: `
+                    uniform float icsOutlineThickness;
+                    void main() {
+                        vec3 expanded = position + normalize(normal) * icsOutlineThickness;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(expanded, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    void main() {
+                        gl_FragColor = vec4(0.067, 0.067, 0.067, 0.95);
+                    }
+                `,
+                side: THREE.BackSide,
                 transparent: true,
-                opacity: 0.95,
                 depthTest: true,
                 depthWrite: false,
                 toneMapped: false
             });
+            getOutlineMaterial.material.name = 'ICS Silhouette Outline Material';
+            return getOutlineMaterial.material;
+        } catch (error) {
+            console.warn('[ICS] Could not create outline material:', error);
+            return null;
         }
-        return getOutlineMaterial.material;
     }
 
     function disposeOutlineObject(outline) {
         try {
             if (!outline) return;
-            if (outline.geometry?.dispose) outline.geometry.dispose();
             if (outline.parent) outline.parent.remove(outline);
+            // The geometry belongs to Blockbench's mesh and is intentionally
+            // shared. Never dispose it here.
         } catch (error) {
             console.warn('[ICS] Outline cleanup failed:', error);
         }
@@ -298,29 +309,27 @@
     function createOutlineForMesh(mesh) {
         if (!mesh || !mesh.isMesh || !mesh.geometry) return null;
         if (mesh.userData?.[OUTLINE_OBJECT_KEY]) return mesh.userData[OUTLINE_OBJECT_KEY];
-        if (typeof THREE === 'undefined' || typeof THREE.EdgesGeometry !== 'function') return null;
 
         const material = getOutlineMaterial();
-        if (!material) return null;
+        if (!material || typeof THREE === 'undefined') return null;
 
-        let outline;
         try {
-            outline = new THREE.LineSegments(
-                new THREE.EdgesGeometry(mesh.geometry, 30),
-                material
-            );
+            const outline = new THREE.Mesh(mesh.geometry, material);
             outline.name = 'ics_outline';
             outline.userData = outline.userData || {};
             outline.userData.icsOutline = true;
-            outline.renderOrder = 1000;
+            outline.renderOrder = 999;
             outline.frustumCulled = mesh.frustumCulled;
+            outline.matrixAutoUpdate = true;
+
+            // Keep the shell in the exact same local coordinate system as the
+            // original mesh. This preserves arbitrary rotations/scales.
             mesh.add(outline);
             mesh.userData = mesh.userData || {};
             mesh.userData[OUTLINE_OBJECT_KEY] = outline;
             return outline;
         } catch (error) {
             console.warn('[ICS] Could not create outline:', error);
-            disposeOutlineObject(outline);
             return null;
         }
     }
@@ -335,21 +344,18 @@
 
     function applyOutlineToObject(object) {
         if (!outlinesEnabled || !object?.traverse) return;
-
         object.traverse(child => {
             if (!child || child.userData?.icsOutline) return;
             if (child.isMesh && child.geometry) createOutlineForMesh(child);
         });
     }
 
-    function applyOutlinesToAllPreviews() {
+    function applyOutlinesToAllElements() {
         if (!outlinesEnabled) return;
-
         try {
             const elements = typeof Outliner !== 'undefined' && Array.isArray(Outliner.elements)
                 ? Outliner.elements
                 : [];
-
             for (const element of elements) {
                 const object = element?.mesh;
                 if (object) applyOutlineToObject(object);
@@ -364,7 +370,6 @@
             const elements = typeof Outliner !== 'undefined' && Array.isArray(Outliner.elements)
                 ? Outliner.elements
                 : [];
-
             for (const element of elements) {
                 const object = element?.mesh;
                 if (!object?.traverse) continue;
@@ -377,9 +382,8 @@
 
     function setOutlinesEnabled(enabled) {
         outlinesEnabled = !!enabled;
-
         if (outlinesEnabled) {
-            applyOutlinesToAllPreviews();
+            applyOutlinesToAllElements();
             Blockbench.showQuickMessage('ICS Outlines: ON');
         } else {
             removeAllOutlines();
@@ -391,17 +395,13 @@
         setOutlinesEnabled(!outlinesEnabled);
     }
 
-    function installOutlineRefreshListener() {
-        // Blockbench's model update events cause render objects to be rebuilt.
-        // Refreshing on the existing camera event also catches normal preview
-        // interaction without introducing a per-frame polling loop.
-        if (typeof Blockbench?.on !== 'function') return;
-        Blockbench.on('update_camera_position', refreshOutlinesAfterSceneUpdate);
+    function refreshOutlinesAfterSceneUpdate() {
+        if (outlinesEnabled) applyOutlinesToAllElements();
     }
 
-    function refreshOutlinesAfterSceneUpdate() {
-        if (!outlinesEnabled) return;
-        applyOutlinesToAllPreviews();
+    function installOutlineRefreshListener() {
+        if (typeof Blockbench?.on !== 'function') return;
+        Blockbench.on('update_camera_position', refreshOutlinesAfterSceneUpdate);
     }
 
     function removeOutlineRefreshListener() {
@@ -418,9 +418,7 @@
         outlinesEnabled = false;
         removeOutlineRefreshListener();
         removeAllOutlines();
-        if (getOutlineMaterial.material?.dispose) {
-            getOutlineMaterial.material.dispose();
-        }
+        if (getOutlineMaterial.material?.dispose) getOutlineMaterial.material.dispose();
         getOutlineMaterial.material = null;
     }
 
@@ -428,9 +426,7 @@
         try {
             const menu = MenuBar?.menus?.tools;
             if (!menu) return;
-
             removeMenuHierarchy();
-
             menu.structure.push({
                 id: MENU_ID,
                 name: 'ICS',
@@ -450,10 +446,8 @@
         removeRenderHook();
         originalPixelRatios.clear();
         removeMenuHierarchy();
-
         while (actions.length) safeDelete(actions.pop());
         while (tools.length) safeDelete(tools.pop());
-
         returnToMoveTool();
     }
 
@@ -468,30 +462,11 @@
         min_version: '4.0.0',
 
         onload() {
-            createFeature(
-                MOBILE_OPTIMIZER_ID,
-                'Mobile Optimization',
-                'speed',
-                toggleMobileOptimization
-            );
-
-            createFeatureAction(
-                MOBILE_OPTIMIZER_ACTION_ID,
-                'Mobile Optimization',
-                'speed',
-                toggleMobileOptimization
-            );
-
-            createFeatureAction(
-                OUTLINE_ACTION_ID,
-                'Outlines',
-                'border_all',
-                toggleOutlines
-            );
-
+            createFeature(MOBILE_OPTIMIZER_ID, 'Mobile Optimization', 'speed', toggleMobileOptimization);
+            createFeatureAction(MOBILE_OPTIMIZER_ACTION_ID, 'Mobile Optimization', 'speed', toggleMobileOptimization);
+            createFeatureAction(OUTLINE_ACTION_ID, 'Outlines', 'border_all', toggleOutlines);
             installOutlineRefreshListener();
             buildHierarchy();
-
             Blockbench.showQuickMessage('ICS v' + VERSION + ' loaded');
         },
 
