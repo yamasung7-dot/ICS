@@ -1,11 +1,11 @@
 // ICS — Immortal Cursed Spirit
-// v0.16.1 — Full-resolution 2D silhouette overlay
+// v0.17.0 — Scene-wide camera silhouette alignment
 // Mobile optimization + 2D-first camera silhouette rendering.
 
 (function () {
     'use strict';
 
-    const VERSION = '0.16.1';
+    const VERSION = '0.17.0';
     const PLUGIN_ID = 'ics';
     const OUTLINE_SETTINGS_KEY = 'ics_outline_settings';
     const MOBILE_OPTIMIZER_ACTION_ID = 'ics_mobile_optimizer_action';
@@ -173,53 +173,106 @@
         state.target = new THREE.WebGLRenderTarget(width, height, {minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, depthBuffer: false, stencilBuffer: false});
         state.width = width; state.height = height;
     }
+
+    // Build the mask from the actual rendered Blockbench scene rather than
+    // Outliner.elements. This catches nested/grouped/mesh children as well as
+    // top-level elements, so every visible model object participates.
     function syncMaskMeshes(state) {
         const seen = new Set();
-        if (typeof Outliner === 'undefined' || !Array.isArray(Outliner.elements)) return;
-        for (const element of Outliner.elements) {
-            const mesh = element?.mesh; if (!mesh?.geometry || !mesh.isMesh) continue;
-            const key = element.uuid || mesh.uuid; seen.add(key);
+        const sourceScene = typeof Canvas !== 'undefined' ? Canvas.scene : null;
+        if (!sourceScene?.traverse) return;
+
+        sourceScene.updateMatrixWorld?.(true);
+        sourceScene.traverse(object => {
+            if (!object?.isMesh || !object.geometry) return;
+            if (object.visible === false) return;
+
+            const key = object.uuid;
+            seen.add(key);
             let maskMesh = state.maskMeshes.get(key);
-            if (!maskMesh || maskMesh.geometry !== mesh.geometry) {
+            if (!maskMesh || maskMesh.geometry !== object.geometry) {
                 if (maskMesh) state.maskScene.remove(maskMesh);
-                maskMesh = new THREE.Mesh(mesh.geometry, state.maskMaterial);
-                state.maskMeshes.set(key, maskMesh); state.maskScene.add(maskMesh);
+                maskMesh = new THREE.Mesh(object.geometry, state.maskMaterial);
+                state.maskMeshes.set(key, maskMesh);
+                state.maskScene.add(maskMesh);
             }
-            mesh.updateWorldMatrix?.(true, false);
-            maskMesh.matrixWorld.copy(mesh.matrixWorld); maskMesh.matrixAutoUpdate = false;
-            maskMesh.visible = mesh.visible !== false && element.visibility !== false;
+            object.updateWorldMatrix?.(true, false);
+            maskMesh.matrixWorld.copy(object.matrixWorld);
+            maskMesh.matrixAutoUpdate = false;
+            maskMesh.visible = true;
+        });
+
+        for (const [key, maskMesh] of state.maskMeshes) {
+            if (!seen.has(key)) {
+                state.maskScene.remove(maskMesh);
+                state.maskMeshes.delete(key);
+            }
         }
-        for (const [key, maskMesh] of state.maskMeshes) if (!seen.has(key)) { state.maskScene.remove(maskMesh); state.maskMeshes.delete(key); }
     }
+
+    function saveRendererViewport(renderer) {
+        const result = {};
+        try {
+            result.viewport = renderer.getViewport ? renderer.getViewport(new THREE.Vector4()) : null;
+            result.scissor = renderer.getScissor ? renderer.getScissor(new THREE.Vector4()) : null;
+            result.scissorTest = renderer.getScissorTest ? renderer.getScissorTest() : null;
+        } catch (error) {}
+        return result;
+    }
+    function setFullTargetViewport(renderer, state) {
+        if (renderer.setViewport) renderer.setViewport(0, 0, state.width, state.height);
+        if (renderer.setScissorTest) renderer.setScissorTest(false);
+    }
+    function restoreRendererViewport(renderer, saved) {
+        try {
+            if (saved.viewport && renderer.setViewport) renderer.setViewport(saved.viewport.x, saved.viewport.y, saved.viewport.z, saved.viewport.w);
+            if (saved.scissor && renderer.setScissor) renderer.setScissor(saved.scissor.x, saved.scissor.y, saved.scissor.z, saved.scissor.w);
+            if (saved.scissorTest !== null && saved.scissorTest !== undefined && renderer.setScissorTest) renderer.setScissorTest(saved.scissorTest);
+        } catch (error) {}
+    }
+
     function renderScreenSpaceOutline(preview) {
         if (!preview?.renderer || !preview.camera || typeof THREE === 'undefined') return;
         const state = createOutlineState(preview); if (!state) return;
         ensureMaskTarget(preview, state); syncMaskMeshes(state);
         if (!state.maskScene.children.length) return;
+
         const renderer = preview.renderer;
         const previousTarget = renderer.getRenderTarget?.() || null;
         const previousXr = renderer.xr?.enabled;
         const previousAutoClear = renderer.autoClear;
         const previousClearColor = renderer.getClearColor ? renderer.getClearColor(new THREE.Color()) : null;
         const previousClearAlpha = renderer.getClearAlpha ? renderer.getClearAlpha() : 0;
+        const savedViewport = saveRendererViewport(renderer);
         try {
             if (renderer.xr) renderer.xr.enabled = false;
             state.maskScene.updateMatrixWorld(true);
-            renderer.setRenderTarget(state.target); renderer.setClearColor(0x000000, 0); renderer.clear(true, true, true);
+
+            // The mask and overlay must use the exact same full drawing-buffer
+            // viewport. Otherwise the 2D silhouette and the real preview drift
+            // apart, which is what produced the visible offset.
+            setFullTargetViewport(renderer, state);
+            renderer.setRenderTarget(state.target);
+            renderer.setClearColor(0x000000, 0);
+            renderer.clear(true, true, true);
             renderer.render(state.maskScene, preview.camera);
+
             state.overlayMaterial.uniforms.uMask.value = state.target.texture;
             state.overlayMaterial.uniforms.uTexel.value.set(1 / state.width, 1 / state.height);
             state.overlayMaterial.uniforms.uRadius.value = clamp(outlineThickness * 18, 1, 4);
             state.overlayMaterial.uniforms.uColor.value.set(outlineColor);
             state.overlayMaterial.uniforms.uOpacity.value = (OUTLINE_STYLES[outlineType] || OUTLINE_STYLES.ink).opacity;
+
             renderer.setRenderTarget(previousTarget);
             renderer.autoClear = false;
+            setFullTargetViewport(renderer, state);
             renderer.render(state.overlayScene, state.overlayCamera);
         } finally {
             renderer.autoClear = previousAutoClear;
             if (renderer.setClearColor && previousClearColor) renderer.setClearColor(previousClearColor, previousClearAlpha);
             if (renderer.xr) renderer.xr.enabled = previousXr;
             renderer.setRenderTarget(previousTarget);
+            restoreRendererViewport(renderer, savedViewport);
         }
     }
     function clearAllOutlines() { for (const [preview] of outlineStates) disposeOutlineState(preview); }
