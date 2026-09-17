@@ -5,7 +5,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.14.0';
+    const VERSION = '0.14.1';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
@@ -171,36 +171,23 @@
         } catch (error) { console.warn('[ICS] Could not create pencil texture:', error); return null; }
     }
 
-    // Each disconnected island gets its own local expansion center. This
-    // prevents a merged mesh with a gap from being stretched toward one
-    // global center, while still letting all islands render as one feature.
-    function buildComponentGeometry(source) {
+    // IMPORTANT: the previous component-center approach scaled whole planar
+    // regions away from their centers. That literally created a second set of
+    // planes which could clip through each other. v0.14.1 deliberately stops
+    // doing that. The outline remains a non-destructive backface shell, but
+    // all styles expand from vertex normals so Ink/Sketch cannot create the
+    // radial "two planes" failure mode.
+    function buildOutlineGeometry(source) {
         if (typeof THREE === 'undefined' || !source?.attributes?.position) return null;
         const geometry = source.clone();
         try {
-            const position = source.attributes.position;
-            const count = position.count;
-            const parent = new Int32Array(count);
-            const rank = new Uint8Array(count);
-            for (let i = 0; i < count; i++) parent[i] = i;
-            const find = a => { let root = a; while (parent[root] !== root) root = parent[root]; while (parent[a] !== a) { const next = parent[a]; parent[a] = root; a = next; } return root; };
-            const union = (a, b) => { a = find(a); b = find(b); if (a === b) return; if (rank[a] < rank[b]) parent[a] = b; else { parent[b] = a; if (rank[a] === rank[b]) rank[a]++; } };
-            const index = source.index;
-            if (index?.array) {
-                for (let i = 0; i + 2 < index.count; i += 3) { const a = index.getX(i), b = index.getX(i + 1), c = index.getX(i + 2); union(a, b); union(b, c); union(c, a); }
-            } else {
-                for (let i = 0; i + 2 < count; i += 3) { union(i, i + 1); union(i + 1, i + 2); union(i + 2, i); }
-            }
-            const min = new Map(), max = new Map(), p = new THREE.Vector3();
-            for (let i = 0; i < count; i++) {
-                p.fromBufferAttribute(position, i); const root = find(i); let lo = min.get(root), hi = max.get(root);
-                if (!lo) { lo = p.clone(); hi = p.clone(); min.set(root, lo); max.set(root, hi); } else { lo.min(p); hi.max(p); }
-            }
-            const centers = new Float32Array(count * 3);
-            for (let i = 0; i < count; i++) { const root = find(i), lo = min.get(root), hi = max.get(root), c = lo.clone().add(hi).multiplyScalar(0.5); centers[i * 3] = c.x; centers[i * 3 + 1] = c.y; centers[i * 3 + 2] = c.z; }
-            geometry.setAttribute('icsComponentCenter', new THREE.BufferAttribute(centers, 3));
+            if (typeof geometry.computeVertexNormals === 'function') geometry.computeVertexNormals();
             return geometry;
-        } catch (error) { geometry.dispose?.(); console.warn('[ICS] Could not build component outline geometry:', error); return null; }
+        } catch (error) {
+            geometry.dispose?.();
+            console.warn('[ICS] Could not build outline geometry:', error);
+            return null;
+        }
     }
 
     function getOutlineMaterial() {
@@ -218,7 +205,9 @@
                     icsInkVariation: { value: getCurrentOutlineStyle().variation },
                     icsInkPerspective: { value: getCurrentOutlineStyle().perspective },
                     icsPerspectiveCamera: { value: 0 },
-                    icsPencilTexture: { value: pencil }, icsPencilScale: { value: 2.8 }, icsPencilStrength: { value: 0.82 }
+                    icsPencilTexture: { value: pencil },
+                    icsPencilScale: { value: 2.8 },
+                    icsPencilStrength: { value: 0.82 }
                 },
                 vertexShader: `
                     uniform float icsOutlineThickness;
@@ -227,29 +216,52 @@
                     uniform float icsInkVariation;
                     uniform float icsInkPerspective;
                     uniform float icsPerspectiveCamera;
-                    attribute vec3 icsComponentCenter;
                     varying vec2 icsOutlineUv;
                     float inkNoise(vec3 p) { float a=sin(dot(p,vec3(1.73,4.91,2.37))); float b=sin(dot(p,vec3(5.13,1.29,3.77))+1.7); return a*.55+b*.45; }
                     float sketchNoise(vec3 p) { float a=sin(dot(p,vec3(.71,1.93,1.17))+.4); float b=sin(dot(p,vec3(1.41,.63,2.27))+2.1); float c=sin(dot(p,vec3(2.37,1.11,.53))+4.2); return a*.5+b*.3+c*.2; }
                     void main() {
-                        icsOutlineUv=uv; vec3 expanded;
-                        if (icsOutlineMode>.5) {
-                            vec3 fromCenter=position-icsComponentCenter; float variation;
-                            if (icsOutlineMode>1.5) { float broad=sketchNoise(position*.72); float fine=inkNoise(position*1.35); variation=max(.52,.82+broad*.30+fine*.08); }
-                            else variation=1.0+inkNoise(position)*icsInkVariation;
-                            vec4 viewPosition=modelViewMatrix*vec4(position,1.0); float depth=max(1.0,-viewPosition.z), perspectiveFactor=1.0;
-                            if (icsPerspectiveCamera>.5) { perspectiveFactor=clamp(32.0/depth,.65,2.2); perspectiveFactor=mix(1.0,perspectiveFactor,icsInkPerspective); }
-                            float scale=1.0+icsOutlineThickness*icsOutlineThicknessScale*variation*perspectiveFactor;
-                            expanded=icsComponentCenter+fromCenter*scale;
-                        } else expanded=position+normalize(normal)*icsOutlineThickness*icsOutlineThicknessScale;
+                        icsOutlineUv=uv;
+                        float variation=1.0;
+                        if (icsOutlineMode>1.5) {
+                            float broad=sketchNoise(position*.72);
+                            float fine=inkNoise(position*1.35);
+                            variation=max(.52,.82+broad*.30+fine*.08);
+                        } else if (icsOutlineMode>.5) {
+                            variation=1.0+inkNoise(position)*icsInkVariation;
+                        }
+                        vec4 viewPosition=modelViewMatrix*vec4(position,1.0);
+                        float depth=max(1.0,-viewPosition.z);
+                        float perspectiveFactor=1.0;
+                        if (icsPerspectiveCamera>.5) {
+                            perspectiveFactor=clamp(32.0/depth,.65,2.2);
+                            perspectiveFactor=mix(1.0,perspectiveFactor,icsInkPerspective);
+                        }
+                        float amount=icsOutlineThickness*icsOutlineThicknessScale*variation*perspectiveFactor;
+                        vec3 expanded=position+normalize(normal)*amount;
                         gl_Position=projectionMatrix*modelViewMatrix*vec4(expanded,1.0);
                     }
                 `,
                 fragmentShader: `
-                    uniform vec3 icsOutlineColor; uniform float icsOutlineOpacity; uniform sampler2D icsPencilTexture; uniform float icsPencilScale; uniform float icsPencilStrength; varying vec2 icsOutlineUv;
-                    void main() { float textureValue=1.0; if (icsPencilStrength>0.0) { vec4 pencil=texture2D(icsPencilTexture,icsOutlineUv*icsPencilScale); textureValue=mix(1.0,pencil.r,icsPencilStrength); } gl_FragColor=vec4(icsOutlineColor,icsOutlineOpacity*textureValue); }
+                    uniform vec3 icsOutlineColor;
+                    uniform float icsOutlineOpacity;
+                    uniform sampler2D icsPencilTexture;
+                    uniform float icsPencilScale;
+                    uniform float icsPencilStrength;
+                    varying vec2 icsOutlineUv;
+                    void main() {
+                        float textureValue=1.0;
+                        if (icsPencilStrength>0.0) {
+                            vec4 pencil=texture2D(icsPencilTexture,icsOutlineUv*icsPencilScale);
+                            textureValue=mix(1.0,pencil.r,icsPencilStrength);
+                        }
+                        gl_FragColor=vec4(icsOutlineColor,icsOutlineOpacity*textureValue);
+                    }
                 `,
-                side: THREE.BackSide, transparent: true, depthTest: true, depthWrite: false, toneMapped: false
+                side: THREE.BackSide,
+                transparent: true,
+                depthTest: true,
+                depthWrite: false,
+                toneMapped: false
             });
             return getOutlineMaterial.material;
         } catch (error) { console.warn('[ICS] Could not create outline material:', error); return null; }
@@ -295,9 +307,10 @@
         if (!mesh?.isMesh || !mesh.geometry || mesh.userData?.[OUTLINE_OBJECT_KEY]) return mesh?.userData?.[OUTLINE_OBJECT_KEY] || null;
         const material=getOutlineMaterial(); if (!material || typeof THREE==='undefined') return null;
         try {
-            const outlineGeometry=buildComponentGeometry(mesh.geometry); if (!outlineGeometry) return null;
+            const outlineGeometry=buildOutlineGeometry(mesh.geometry); if (!outlineGeometry) return null;
             outlineGeometry.userData=outlineGeometry.userData||{}; outlineGeometry.userData.icsOutlineGeometry=true;
-            const outline=new THREE.Mesh(outlineGeometry,material); outline.name='ics_outline'; outline.userData={icsOutline:true}; outline.renderOrder=999; outline.frustumCulled=mesh.frustumCulled;
+            const outline=new THREE.Mesh(outlineGeometry,material);
+            outline.name='ics_outline'; outline.userData={icsOutline:true}; outline.renderOrder=999; outline.frustumCulled=mesh.frustumCulled;
             outline.onBeforeRender=function(renderer,scene,camera){ const m=getOutlineMaterial.material; if (!m?.uniforms) return; m.uniforms.icsPerspectiveCamera.value=camera?.isPerspectiveCamera?1:0; };
             mesh.add(outline); mesh.userData=mesh.userData||{}; mesh.userData[OUTLINE_OBJECT_KEY]=outline; mesh.userData.icsOutlineSourceGeometry=mesh.geometry; return outline;
         } catch (error) { console.warn('[ICS] Could not create outline:', error); return null; }
