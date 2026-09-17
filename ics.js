@@ -5,7 +5,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.14.1';
+    const VERSION = '0.14.2';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
@@ -171,21 +171,64 @@
         } catch (error) { console.warn('[ICS] Could not create pencil texture:', error); return null; }
     }
 
-    // IMPORTANT: the previous component-center approach scaled whole planar
-    // regions away from their centers. That literally created a second set of
-    // planes which could clip through each other. v0.14.1 deliberately stops
-    // doing that. The outline remains a non-destructive backface shell, but
-    // all styles expand from vertex normals so Ink/Sketch cannot create the
-    // radial "two planes" failure mode.
-    function buildOutlineGeometry(source) {
+    // Hazard keeps the original faceted shell. Ink and Sketch need a shared,
+    // welded surface so their expanded backface cannot split at hard/UV seams.
+    // This fixes the chopped-line symptom without touching Hazard Shell.
+    function buildOutlineGeometry(source, smooth) {
         if (typeof THREE === 'undefined' || !source?.attributes?.position) return null;
-        const geometry = source.clone();
+        if (!smooth) {
+            const geometry = source.clone();
+            try {
+                if (typeof geometry.computeVertexNormals === 'function') geometry.computeVertexNormals();
+                return geometry;
+            } catch (error) {
+                geometry.dispose?.();
+                console.warn('[ICS] Could not build outline geometry:', error);
+                return null;
+            }
+        }
         try {
+            const position = source.attributes.position;
+            const uv = source.attributes.uv;
+            const epsilon = 0.0001;
+            const vertices = [];
+            const uvs = [];
+            const groups = new Map();
+            const remap = new Uint32Array(position.count);
+            const keyFor = (x, y, z) => Math.round(x / epsilon) + ',' + Math.round(y / epsilon) + ',' + Math.round(z / epsilon);
+            for (let i = 0; i < position.count; i++) {
+                const x = position.getX(i), y = position.getY(i), z = position.getZ(i);
+                const key = keyFor(x, y, z);
+                let target = groups.get(key);
+                if (target === undefined) {
+                    target = vertices.length / 3;
+                    groups.set(key, target);
+                    vertices.push(x, y, z);
+                    if (uv) uvs.push(uv.getX(i), uv.getY(i));
+                }
+                remap[i] = target;
+            }
+            const sourceIndex = source.index;
+            const indices = [];
+            const addTriangle = (a, b, c) => {
+                const ra = remap[a], rb = remap[b], rc = remap[c];
+                if (ra === rb || rb === rc || rc === ra) return;
+                indices.push(ra, rb, rc);
+            };
+            if (sourceIndex?.count) {
+                for (let i = 0; i + 2 < sourceIndex.count; i += 3) addTriangle(sourceIndex.getX(i), sourceIndex.getX(i + 1), sourceIndex.getX(i + 2));
+            } else {
+                for (let i = 0; i + 2 < position.count; i += 3) addTriangle(i, i + 1, i + 2);
+            }
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            if (uv) geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+            const IndexArray = vertices.length / 3 > 65535 ? Uint32Array : Uint16Array;
+            geometry.setIndex(new IndexArray(indices));
             if (typeof geometry.computeVertexNormals === 'function') geometry.computeVertexNormals();
             return geometry;
         } catch (error) {
-            geometry.dispose?.();
-            console.warn('[ICS] Could not build outline geometry:', error);
+            console.warn('[ICS] Could not build smooth outline geometry:', error);
             return null;
         }
     }
@@ -307,7 +350,8 @@
         if (!mesh?.isMesh || !mesh.geometry || mesh.userData?.[OUTLINE_OBJECT_KEY]) return mesh?.userData?.[OUTLINE_OBJECT_KEY] || null;
         const material=getOutlineMaterial(); if (!material || typeof THREE==='undefined') return null;
         try {
-            const outlineGeometry=buildOutlineGeometry(mesh.geometry); if (!outlineGeometry) return null;
+            const smoothOutline = outlineType === 'ink' || outlineType === 'sketch';
+            const outlineGeometry=buildOutlineGeometry(mesh.geometry, smoothOutline); if (!outlineGeometry) return null;
             outlineGeometry.userData=outlineGeometry.userData||{}; outlineGeometry.userData.icsOutlineGeometry=true;
             const outline=new THREE.Mesh(outlineGeometry,material);
             outline.name='ics_outline'; outline.userData={icsOutline:true}; outline.renderOrder=999; outline.frustumCulled=mesh.frustumCulled;
@@ -335,14 +379,23 @@
 
     function applyOutlinesToAllElements() {
         if (!outlinesEnabled) return;
-        try { updateOutlineMaterial(); const elements=typeof Outliner!=='undefined'&&Array.isArray(Outliner.elements)?Outliner.elements:[]; for (const element of elements) if (element?.mesh) applyOutlineToObject(element.mesh); }
-        catch (error) { console.warn('[ICS] Outline update failed:', error); }
+        try {
+            updateOutlineMaterial();
+            const elements=typeof Outliner!=='undefined'&&Array.isArray(Outliner.elements)?Outliner.elements:[];
+            for (const element of elements) if (element?.mesh) applyOutlineToObject(element.mesh);
+        } catch (error) { console.warn('[ICS] Outline update failed:', error); }
     }
 
     function removeAllOutlines() {
-        try { const elements=typeof Outliner!=='undefined'&&Array.isArray(Outliner.elements)?Outliner.elements:[]; for (const element of elements) { const object=element?.mesh; if (object?.traverse) object.traverse(child=>removeOutlineFromMesh(child)); } }
-        catch (error) { console.warn('[ICS] Outline removal failed:', error); }
+        try {
+            const elements=typeof Outliner!=='undefined'&&Array.isArray(Outliner.elements)?Outliner.elements:[];
+            for (const element of elements) {
+                const object=element?.mesh;
+                if (object?.traverse) object.traverse(child=>removeOutlineFromMesh(child));
+            }
+        } catch (error) { console.warn('[ICS] Outline removal failed:', error); }
     }
+
     function setOutlinesEnabled(enabled) { outlinesEnabled=!!enabled; if (outlinesEnabled) { applyOutlinesToAllElements(); Blockbench.showQuickMessage('ICS Outlines: ON'); } else { removeAllOutlines(); Blockbench.showQuickMessage('ICS Outlines: OFF'); } }
     function toggleOutlines() { setOutlinesEnabled(!outlinesEnabled); }
     function refreshOutlinesAfterSceneUpdate() { if (outlinesEnabled) applyOutlinesToAllElements(); }
