@@ -1,10 +1,10 @@
 // LRP — Lighting Render & Post-Processing
-// v1.0.0 — Lighting controller foundation
+// v1.5.0 — Lighting controller transform fix
 
 (function () {
     'use strict';
 
-    const VERSION = '1.0.0';
+    const VERSION = '1.5.0';
     const PLUGIN_ID = 'lrp';
 
     let controller_action;
@@ -29,17 +29,19 @@
         if (typeof THREE === 'undefined' || !Canvas || !Canvas.scene) return;
         if (typeof Transformer === 'undefined' || !Transformer) return;
 
+        // The controller root is the actual light position.
+        // The target is offset from it so rotation changes the light direction.
         controller_root = new THREE.Object3D();
         controller_root.name = 'LRP_Light_Controller';
-        controller_root.position.set(0, 0, 0);
+        controller_root.position.set(4, 6, 4);
 
         controller_light = new THREE.DirectionalLight(0xffffff, 1.0);
         controller_light.name = 'LRP_Directional_Light';
-        controller_light.position.set(4, 6, 4);
+        controller_light.position.set(0, 0, 0);
 
         controller_target = new THREE.Object3D();
         controller_target.name = 'LRP_Directional_Target';
-        controller_target.position.set(0, 0, 0);
+        controller_target.position.set(0, 0, -4);
 
         controller_light.target = controller_target;
         controller_root.add(controller_light);
