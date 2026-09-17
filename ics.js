@@ -5,7 +5,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.12.0';
+    const VERSION = '0.13.0';
     const PLUGIN_ID = 'ics';
     const TOOLBAR_ID = 'main_tools';
     const MENU_ID = 'ics_feature_menu';
@@ -20,10 +20,6 @@
     const DEFAULT_OUTLINE_COLOR = '#111111';
     const DEFAULT_OUTLINE_TYPE = 'hazard_shell';
 
-    // Hazard Shell preserves the original normal-extruded boundary.
-    // Ink uses a continuous radial shell with controlled stroke variation and
-    // camera-depth scaling. Sketch pushes that same idea toward hand-drawn
-    // line weight: slower pressure changes, organic wobble, and gentle taper.
     const OUTLINE_STYLES = {
         hazard_shell: {
             name: 'Hazard Shell',
@@ -31,7 +27,8 @@
             opacity: 0.95,
             mode: 0,
             variation: 0,
-            perspective: 0
+            perspective: 0,
+            texture: 0
         },
         ink: {
             name: 'Ink',
@@ -39,15 +36,17 @@
             opacity: 1,
             mode: 1,
             variation: 0.22,
-            perspective: 0.85
+            perspective: 0.85,
+            texture: 0
         },
         sketch: {
             name: 'Sketch',
-            thicknessScale: 0.82,
-            opacity: 0.96,
+            thicknessScale: 0.84,
+            opacity: 0.98,
             mode: 2,
-            variation: 0.32,
-            perspective: 0.65
+            variation: 0.34,
+            perspective: 0.7,
+            texture: 1
         }
     };
 
@@ -61,6 +60,7 @@
     let outlineThickness = DEFAULT_OUTLINE_THICKNESS;
     let outlineColor = DEFAULT_OUTLINE_COLOR;
     let outlineType = DEFAULT_OUTLINE_TYPE;
+    let pencilTexture = null;
 
     function safeDelete(item) {
         try {
@@ -290,10 +290,58 @@
         return OUTLINE_STYLES[outlineType] || OUTLINE_STYLES[DEFAULT_OUTLINE_TYPE];
     }
 
+    // Small procedural graphite texture. It is created once, kept in memory,
+    // and never downloaded, so Sketch stays self-contained and Android-friendly.
+    function getPencilTexture() {
+        if (pencilTexture) return pencilTexture;
+        if (typeof THREE === 'undefined' || typeof THREE.DataTexture !== 'function') return null;
+        try {
+            const size = 64;
+            const data = new Uint8Array(size * size * 4);
+            const fract = value => value - Math.floor(value);
+            const hash = (x, y) => fract(Math.sin(x * 127.1 + y * 311.7) * 43758.5453);
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const u = x / size;
+                    const v = y / size;
+                    const grain = hash(x, y);
+                    const coarse = hash(Math.floor(x / 4), Math.floor(y / 4));
+                    const diagonal = Math.sin((u * 92.0) + (v * 26.0) + coarse * 2.2);
+                    const broken = Math.sin((u * 173.0) - (v * 39.0) + grain * 6.0);
+                    const graphite = clamp(
+                        0.56 + diagonal * 0.22 + broken * 0.10 + (grain - 0.5) * 0.16,
+                        0.08, 0.98
+                    );
+                    const alpha = clamp(0.50 + graphite * 0.50, 0, 1);
+                    const index = (y * size + x) * 4;
+                    const value = Math.round(255 * graphite);
+                    data[index] = value;
+                    data[index + 1] = value;
+                    data[index + 2] = value;
+                    data[index + 3] = Math.round(255 * alpha);
+                }
+            }
+            pencilTexture = new THREE.DataTexture(
+                data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType
+            );
+            pencilTexture.wrapS = THREE.RepeatWrapping;
+            pencilTexture.wrapT = THREE.RepeatWrapping;
+            pencilTexture.magFilter = THREE.LinearFilter;
+            pencilTexture.minFilter = THREE.LinearFilter;
+            pencilTexture.needsUpdate = true;
+            pencilTexture.name = 'ICS Pencil Texture';
+            return pencilTexture;
+        } catch (error) {
+            console.warn('[ICS] Could not create pencil texture:', error);
+            return null;
+        }
+    }
+
     function getOutlineMaterial() {
         if (typeof THREE === 'undefined') return null;
         if (getOutlineMaterial.material) return getOutlineMaterial.material;
         try {
+            const pencil = getPencilTexture();
             getOutlineMaterial.material = new THREE.ShaderMaterial({
                 uniforms: {
                     icsOutlineThickness: { value: outlineThickness },
@@ -304,7 +352,10 @@
                     icsInkVariation: { value: getCurrentOutlineStyle().variation },
                     icsInkPerspective: { value: getCurrentOutlineStyle().perspective },
                     icsPerspectiveCamera: { value: 0 },
-                    icsObjectCenter: { value: new THREE.Vector3() }
+                    icsObjectCenter: { value: new THREE.Vector3() },
+                    icsPencilTexture: { value: pencil },
+                    icsPencilScale: { value: 2.8 },
+                    icsPencilStrength: { value: 0.82 }
                 },
                 vertexShader: `
                     uniform float icsOutlineThickness;
@@ -314,6 +365,7 @@
                     uniform float icsInkPerspective;
                     uniform float icsPerspectiveCamera;
                     uniform vec3 icsObjectCenter;
+                    varying vec2 icsOutlineUv;
 
                     float inkNoise(vec3 p) {
                         float a = sin(dot(p, vec3(1.73, 4.91, 2.37)));
@@ -329,25 +381,19 @@
                     }
 
                     void main() {
+                        icsOutlineUv = uv;
                         vec3 expanded;
 
                         if (icsOutlineMode > 0.5) {
-                            // Radial expansion keeps the stroke continuous at
-                            // hard corners instead of following discontinuous normals.
                             vec3 fromCenter = position - icsObjectCenter;
                             float variation;
 
                             if (icsOutlineMode > 1.5) {
-                                // Sketch: simulate a creative hand's pressure.
-                                // Large, slow changes make line weight breathe;
-                                // smaller detail adds natural wobble without
-                                // turning the contour into noisy geometry.
                                 float broad = sketchNoise(position * 0.72);
                                 float fine = inkNoise(position * 1.35);
-                                float pressure = 0.84 + broad * 0.30 + fine * 0.08;
-                                variation = max(0.55, pressure);
+                                float pressure = 0.82 + broad * 0.30 + fine * 0.08;
+                                variation = max(0.52, pressure);
                             } else {
-                                // Ink: controlled, cleaner stroke variation.
                                 variation = 1.0 + inkNoise(position) * icsInkVariation;
                             }
 
@@ -371,8 +417,21 @@
                 fragmentShader: `
                     uniform vec3 icsOutlineColor;
                     uniform float icsOutlineOpacity;
+                    uniform sampler2D icsPencilTexture;
+                    uniform float icsPencilScale;
+                    uniform float icsPencilStrength;
+                    varying vec2 icsOutlineUv;
+
                     void main() {
-                        gl_FragColor = vec4(icsOutlineColor, icsOutlineOpacity);
+                        float textureValue = 1.0;
+                        if (icsPencilStrength > 0.0) {
+                            vec2 uv = icsOutlineUv * icsPencilScale;
+                            vec4 pencil = texture2D(icsPencilTexture, uv);
+                            float graphite = pencil.r;
+                            textureValue = mix(1.0, graphite, icsPencilStrength);
+                        }
+                        float alpha = icsOutlineOpacity * textureValue;
+                        gl_FragColor = vec4(icsOutlineColor, alpha);
                     }
                 `,
                 side: THREE.BackSide,
@@ -400,6 +459,7 @@
         if (material.uniforms.icsOutlineMode) material.uniforms.icsOutlineMode.value = style.mode;
         if (material.uniforms.icsInkVariation) material.uniforms.icsInkVariation.value = style.variation;
         if (material.uniforms.icsInkPerspective) material.uniforms.icsInkPerspective.value = style.perspective;
+        if (material.uniforms.icsPencilStrength) material.uniforms.icsPencilStrength.value = style.texture ? 0.82 : 0;
         material.name = 'ICS ' + style.name + ' Outline Material';
         material.needsUpdate = true;
     }
@@ -594,6 +654,8 @@
         removeAllOutlines();
         if (getOutlineMaterial.material?.dispose) getOutlineMaterial.material.dispose();
         getOutlineMaterial.material = null;
+        if (pencilTexture?.dispose) pencilTexture.dispose();
+        pencilTexture = null;
     }
 
     function buildHierarchy() {
